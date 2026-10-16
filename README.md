@@ -6,34 +6,50 @@
 - provider id：`9router`（搜索）、`9router-fetch`（抓取）
 - 只替换 `ctx.web` 接缝的 **provider 层**：工具的 JSON schema、系统提示词、结果卡片与 UI 全部不变，模型无感
 
-## 接入方式
+## 安装
+
+### 推荐：从 git 安装（自带补丁，卸载干净）
+
+```
+dsh plugin add github:yifabunemgshoushi-oss/dsh-9router-web-search
+```
+
+插件通过 `package.json` 的 `dsh.bundle.patch` 声明自带的 `cordis.patch.yml`，安装时 dsh 会自动处理两件事，**不需要手改 profile**：
+
+1. 把插件插入 Loader 行；
+2. 把 `web` 接缝的 provider 指向它。
+
+**卸载也会自动清理**：`app-boot/src/profile-plugins.ts` 的 `reconcileProfilePlugins` 会在包失去 `dsh.bundle.patch` 声明（或依赖被移除）时，自动把本 bundle 从 profile 的 `bundles` 列表剔除，补丁层随之消失，`web` 行回落到 base 的默认 provider（`deepseek-official` / `http`），**不留悬空引用**。
+
+> 这一点很关键。若插件**没有**自带补丁、而是在 profile 里手写 entry，卸载器不知道那些手写条目的存在，会残留一条指向已卸载插件的行——插件页会继续显示它，且 `web` 行留下悬空 provider id（可能触发 `WEB_PROVIDER_CONFIGURED_MISSING`）。
+
+### 密钥怎么给
+
+补丁里**不写明文密钥**，只声明凭据引用：
+
+```yaml
+apiKeyEnv: NINEROUTER_API_KEY
+```
+
+插件按 `字面量 apiKey` → `credentials 域` → `启动环境变量` 的顺序解析（`lib/index.js` 的 `resolveApiKey`）。三种给法任选：
+
+- **凭据域（推荐）**：`dsh` 的「设置 → 插件 → 9Router 网页搜索」里填 API Key，写入 `<DSH_HOME>/.credentials.yaml` 的 `refs`；
+- **环境变量**：设 `NINEROUTER_API_KEY`（注意要用 `apiKeyEnv` 指向的那个名字）；
+- **profile 局部覆盖**：在 profile 的 `cordis.patch.yml` 里覆盖本行 config 补 `apiKey`。注意 `config` 是**整段替换**，须重述其余字段。
+
+### 本地开发（`link:` 挂载）
 
 源码目录：`D:\other\dsh-plugins\dsh-9router-web-search`（与 `dsh-mcp-manager`、`dsh-settings-extras` 同级）。
 
-**目录名 ≠ 包名**：插件对外身份是包名 `9router-web-search`（`package.json` 的 `name`），目录上的 `dsh-` 前缀只是本地存放约定，不参与解析。profile 是**按依赖键**在 `node_modules` 里建软链，所以依赖键必须写包名，不能写目录名；`cordis.patch.yml` 里的 entry `name` 同理。
+**目录名 ≠ 包名**：插件对外身份是包名 `9router-web-search`（`package.json` 的 `name`），目录上的 `dsh-` 前缀只是本地存放约定，不参与解析。profile 按**依赖键**建软链，所以依赖键必须写包名。
 
-先在 profile 的 `package.json` 里加一条 link 依赖，让包名能从 profile 解析到源码目录：
+在 profile 的 `package.json` 里加一条 link 依赖，再跑 `pnpm install` 生成软链：
 
 ```json
 "9router-web-search": "link:D:/other/dsh-plugins/dsh-9router-web-search"
 ```
 
-然后跑 `pnpm install` 生成软链（`node_modules/9router-web-search` → 源码目录）。
-
-再在 profile 的 `cordis.patch.yml` 里做两处改动：插入插件条目，并把 web 接缝的 provider 指向它。
-
-```yaml
-- insert:
-    - id: 9router-web-search
-      name: 9router-web-search
-      config:
-        apiKey: <你的 9router key>
-- id: web
-  name: "@deepseek-ai/dsh-web"
-  config:
-    searchProvider: 9router
-    fetchProvider: 9router-fetch
-```
+改用（或改用回）link 挂载时，**记得把 git 安装时期留下的 profile 手写条目一并清掉**，否则同一 `id` 会有两份定义（后者静默覆盖前者，不报错）。
 
 ## 配置字段
 

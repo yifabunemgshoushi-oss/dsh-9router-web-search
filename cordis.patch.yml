@@ -1,0 +1,38 @@
+# 9router 网页 provider 的 bundle 补丁层。
+#
+# 两件事：
+#   1. insert 本插件自己的 Loader 行；
+#   2. 覆盖 `web` 接缝行，把 search/fetch provider 指向本插件注册的 id。
+#
+# 为什么必须随包携带补丁（而不是让用户手改 profile）：
+#   - 补丁层在 Bundle 层应用（app-boot/src/profile.ts 把每个 bundle 的
+#     cordis.patch.yml 依次叠成层），本插件作为新 bundle 追加在 dsh-base 之后，
+#     故这里能覆盖 base 定义的 `web` 行；
+#   - 卸载时 profile 会自动把本 bundle 从 bundles 列表剔除
+#     （app-boot/src/profile-plugins.ts 的 reconcileProfilePlugins），
+#     补丁层随之消失，`web` 行回落到 base 的默认 provider，不留悬空引用。
+#
+# 覆盖语义提醒：`config` 是整段替换、不深合并，故下面 `web` 行重述了全部需要的字段。
+#
+# 密钥不落此文件：apiKey 留空，由 apiKeyEnv 指定的凭据引用从 credentials 域解析
+# （见 lib/index.js 的 resolveApiKey：字面量 -> credentials 服务 -> 启动环境变量）。
+- insert:
+    - id: 9router-web-search
+      name: 9router-web-search
+      config:
+        enabled: true
+        baseUrl: http://localhost:20128
+        apiKeyEnv: NINEROUTER_API_KEY
+        searchModel: search-combo
+        fetchModel: fetch-combo
+        searchType: web
+        timeoutMs: 60000
+        fallbackToBuiltin: true
+
+# 把 web 接缝指向本插件的 provider。两个 provider 常驻注册，故不会出现
+# WEB_PROVIDER_CONFIGURED_MISSING；关闭 enabled 即在执行路径上回退内置实现。
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: 9router
+    fetchProvider: 9router-fetch
