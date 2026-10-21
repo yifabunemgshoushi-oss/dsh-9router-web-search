@@ -1,6 +1,6 @@
 {
   "name": "9router-web-search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "用 9router 的搜索/抓取服务替换 dsh 内置 web provider（带内置回退）",
   "type": "module",
   "main": "lib/index.js",
