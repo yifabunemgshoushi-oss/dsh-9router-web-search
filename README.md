@@ -55,7 +55,7 @@ apiKeyEnv: NINEROUTER_API_KEY
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `enabled` | `true` | 关闭后不再调用 9router，直接走内置实现 |
+| `enabled` | `true` | 开启时强制 9router，并把 `web` 的 provider 选择写回 9router；关闭后不再调用 9router，直接走内置实现 |
 | `baseUrl` | `http://localhost:20128` | 9router 服务地址。**不要带 `/v1`**，插件自己拼 `/v1/search`、`/v1/web/fetch` |
 | `apiKey` | 空 | 9router 的 API Key。走 credentials 域存储，不写入设置文件 |
 | `apiKeyEnv` | `NINEROUTER_API_KEY` | 密钥引用名；`apiKey` 为空时按此名去 credentials / 环境变量解析 |
@@ -111,18 +111,18 @@ searchType: c.search_type || provider.searchTypes?.[0] || "web"
 
 ## 回退语义
 
-触发条件：`enabled = false`，或 9router 调用失败且 `fallbackToBuiltin = true`。
+触发条件：`enabled = false`，或 9router 调用失败且 `fallbackToBuiltin = true`。另外，`enabled = true` 时插件会把 `web` 的 provider 选择强制写回 9router，避免内置开关把执行路径切走（见「0.2.1 适配说明」）。
 
 | 能力 | 回退实现 |
 |---|---|
 | 抓取 | 匿名 HTTP GET（等价 dsh 内置的 `dsh-web-fetch-http`），按 content-type 判定 `html` / `text`；非 2xx 作为**正常结果**返回而非抛错 |
-| 搜索 | 等价的 DeepSeek 原生搜索（Anthropic 兼容 Messages + `web_search_20250305`）。**需要 `DEEPSEEK_API_KEY`**，取不到时如实报 `WEB_PROVIDER_CREDENTIAL_MISSING`，不会编造结果 |
+| 搜索 | 等价的 DeepSeek 原生搜索（Anthropic 兼容 Messages + `web_search_20250305`，并显式发送 `thinking: { type: 'disabled' }`）。**需要 `DEEPSEEK_API_KEY`**，取不到时如实报 `WEB_PROVIDER_CREDENTIAL_MISSING`，不会编造结果 |
 
 **为什么用常驻注册 + 开关，而不是"卸载即回退"**：`ctx.web` 的 provider 选择策略是"显式配置的 id 优先"，若插件卸载，接缝会报 `WEB_PROVIDER_CONFIGURED_MISSING` 而不是回退。所以两个 provider 常驻注册，由 `enabled` 在**执行路径**上切换，这样一拨开关就能热回退，无需重启。
 
 ## 设置面板
 
-位置：**设置 → 插件 → 9Router 网页搜索**。
+位置：**插件 → 9Router 网页搜索**（0.2.0 时代写作「设置 → 插件」，0.2.1 起插件配置统一收在插件页）。
 
 可以改：启用开关、接口地址、API Key、密钥引用名、搜索模型、抓取模型、搜索类型、超时、失败回退开关。改完即热生效，无需重启。
 
@@ -137,9 +137,39 @@ searchType: c.search_type || provider.searchTypes?.[0] || "web"
 - **移植范围**：只移植本插件用到的能力。原包中 `SettingsValueField` 的 `help` 信息按钮、`numeric` / `placeholder` 透传，以及各控件的 `className` / `title` 透传均未移植（本插件不需要），因此没有无测试覆盖的死代码。
 - **`SettingsFormModel` 的差异**：原实现依赖 `@deepseek-ai/dsh-client-store` 的 `createSnapshotStore`；自带版改为等价的极小实现（`subscribe` / `getSnapshot` / `set`），以彻底断开该依赖。语义（暂存编辑、保存、修订栅栏、`base`/`user` 分层、overridden 判定）完全保留。
 
+## 0.2.1 适配说明（2026-10-21 核对）
+
+已对照 dsh 源码 `0.2.1-rc.2`（`D:\AI_ls\deepseekHarness`）核对。宿主契约未变，本插件不需要为 0.2.1 重写：
+
+- `ctx.web` 的 provider 接口、`registerSearchProvider` / `registerFetchProvider`、`WebError` 与错误码、`WebSearchResult` / `WebFetchResult` 形状均未变。
+- `@deepseek-ai/dsh-credentials` 的 `credentialRef` / `isCredentialRefName` / `resolve()`、`@deepseek-ai/dsh-launch-environment` 的 `launchEnvironmentOf()` 均未变；0.2.1 把凭据优先级改为「存储优先于环境」，与本插件「字面量 → credentials → 启动环境」的解析顺序一致。
+- 客户端 `dsh.client` 清单、`window.__ModuleLoader__.load` 协议、`plugins.item` 槽位、`ctx.configForms` 的 `getSnapshot` / `subscribe` / `mutate` 均未变（仅删除了本插件未使用的 `mode` 字段）；`react` 与 `react/jsx-runtime` 仍是平台种子模块。
+- `web` 行的 `searchProvider` / `fetchProvider` 在 0.2.1 变为 volatile（每次搜索/抓取时读取），本插件补丁的写法无需调整。
+- peer 范围 `^0.2.0-rc.2` 在 0.2.1 的兼容性判定（`includePrerelease: true`）下仍满足 `0.2.1-rc.2`，不会被判为不兼容。
+
+两处行为变化：
+
+1. **内置搜索回退已同步**：0.2.1 的内置 Messages 搜索显式发送 `thinking: { type: 'disabled' }`，避免正文被丢弃的辅助请求白跑思考 token；本插件回退路径已同步。
+2. **内置开关会被本插件接管**：0.2.1 新增 `web-deepseek-api`（`deepseek-search-api` / `deepseek-fetch-api`），内置「网页搜索」页的 **Use the new Web Search API** 开关会把 `web.searchProvider` / `web.fetchProvider` 写进 profile 的用户层。它与本插件的 `enabled` 开关**不是一回事**：
+
+   | 状态 | 实际执行 |
+   |---|---|
+   | 本插件开 | 强制 9router；守卫发现 `web` 选择被改走时写回 `9router` / `9router-fetch` |
+   | 本插件关 | seam 保持当前选择；若仍是 9router，则走插件内部的内置等价实现；内置开关可正常切换 |
+
+   `enabled` 为 `true` 时，`installWebSelectionGuard` 订阅 `settings/document-updated`，用 `settings.describe()` 读取 `web` 的生效值，发现不是 9router 就用 `settings.update('web', …)` 写回。写入放在微任务里避免重入；写回值与 bundle 层一致时，settings 会直接删除用户层覆盖，所以内置开关保存后会在下一次刷新被改回 OFF，日志会记录一条 `restoring web.searchProvider/fetchProvider to 9router`。`enabled` 为 `false` 时守卫不写入，把选择权交还内置页面。
+
+   因此，开启插件时不会出现“拨一下内置开关就绕过插件、没 DeepSeek 凭据导致搜索全挂”的情况。例外是 `web` 行被 home patch 或命令行 overlay 覆盖：`configEditor.edit` 会拒绝写入，守卫只能记录警告，无法强制——这是宿主规定的覆盖优先级。
+
+   此时内置「网页搜索」页会显示 Messages 模式，但实际执行的是 9router；在该页改 Messages 的 baseURL / maxUses 不会影响 9router，只有 `DEEPSEEK_API_KEY` 会被插件的内部回退使用。
+
+   > 仍不建议给 `web-deepseek-api` 加 `disabled: true` 来藏开关：守卫只在插件启用时生效；插件关闭时，如果用户层已经保存过 `searchProvider: deepseek-search-api`，禁用该行会让 `web` 指向未注册的 provider，触发 `WEB_PROVIDER_CONFIGURED_MISSING`。
+
+> 升级安装提示：0.2.1 起 HMR 模式下对已安装包再次安装会返回 `already-installed`；更新本插件需先在插件页移除，再重新安装。
+
 ## 维护提示
 
-- **源码目录与挂载方式**：源码在 `D:\other\dsh-plugins\dsh-9router-web-search`（2026-10-16 从 `profiles/desktop/node_modules/9router-web-search` 迁出并改名），通过 profile 的 `link:` 依赖挂载，`node_modules/9router-web-search` 是指向它的软链。改代码后重启 dsh 生效；**不要**把源码目录改回非 link 的实体副本，否则 profile 里会出现第二份、与源码不同步的拷贝。
+- **源码目录与挂载方式**：源码在 `D:\other\dsh-plugins\dsh-9router-web-search`。桌面 profile 目前用 git 依赖（`github:yifabunemgshoushi-oss/dsh-9router-web-search`），`profiles/desktop/node_modules/9router-web-search` 是安装出来的实体副本；本地改完源码后，要么把该依赖临时改成 `link:D:/other/dsh-plugins/dsh-9router-web-search` 再 `pnpm install`，要么推送后走插件页更新。两种方式改完都需重启 dsh 才生效。
 - **依赖由宿主供给，仓库不携带 `node_modules`**：`package.json` 把插件**直接 import 的 4 个包**声明为 `peerDependencies` 与 `devDependencies` 各一份——`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-launch-environment`、`@deepseek-ai/dsh-web`、`@deepseek-ai/schemastery`。
   - peer 让 profile 解析器用**运行中 dsh 安装里的那一份**占据该包名，**即使插件目录下没有物理 `node_modules` 也成立**（见 `packages/boot/app-boot/src/profile-resolution/resolver.ts` 的 `routeLinked`：读 importer 祖先链上每层 manifest 的 `peerDependencies` 来判定拦截）。dev 副本供编译器/独立测试使用，运行时不会被加载。
   - **必须共用同一实例**：`lib/index.js` 用 `error instanceof WebError` 判定错误，两侧各自复制一份会让该判定静默失效。
@@ -148,4 +178,4 @@ searchType: c.search_type || provider.searchTypes?.[0] || "web"
   - **升级 dsh 后**若出现模块缺失或 API 不存在，核对两个不变量：① `package.json` 里 peer 声明的每个包名，都仍出现在 dsh 安装闭包中（`app.asar` 内 `dsh/node_modules/@deepseek-ai/*`，本次核对时共 289 个）；② 插件直接 import 的每个包名都已声明 peer。历史上 `profiles/node_modules` 曾是指向 **npm 版 dsh** `0.1.0-rc.7` 的 junction 农场，那套缺 `schemastery.volatile()` 与 `dsh-credentials.isCredentialRefName`，加载会崩；该农场已于 2026-10-13 清理。
 - **分发方式**：本地开发用 profile 的 `link:` 依赖（见上）。要装到别的机器，走 git 源（`dsh plugin add github:<用户>/dsh-9router-web-search`），由插件管理器在 profile 内跑 pnpm 安装依赖。**`lib/` 必须提交**：安装前会预检 `exports` 指向的文件真实存在，缺构建产物会直接判为失败。
 - **命名空间即 entry id**：settings 命名空间等于 profile 里的 entry id。若要改名，`cordis.patch.yml` 的 `id`、`lib/index.js` 的 `name`、`lib/client.js` 的 bundle `id` 与 `ROUTER_NS` 必须一起改；旧命名空间下面板写入的用户层配置会变成孤儿。
-- **桌面版契约**：本插件按 dsh **0.2.0-rc.2** 的接口编写（`config.<field>.get()` 形式的 volatile 配置、`ctx.configForms` 设置面板、`plugins.item` 槽位）。用于更早的 npm 版 dsh 需要按旧 API 改写。
+- **桌面版契约**：本插件按 dsh **0.2.0-rc.2** 的接口编写，并已核对 **0.2.1-rc.2** 仍然兼容（见上节「0.2.1 适配说明」）。用于更早的 npm 版 dsh 需要按旧 API 改写。
