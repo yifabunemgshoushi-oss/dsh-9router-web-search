@@ -137,9 +137,9 @@ searchType: c.search_type || provider.searchTypes?.[0] || "web"
 - **移植范围**：只移植本插件用到的能力。原包中 `SettingsValueField` 的 `help` 信息按钮、`numeric` / `placeholder` 透传，以及各控件的 `className` / `title` 透传均未移植（本插件不需要），因此没有无测试覆盖的死代码。
 - **`SettingsFormModel` 的差异**：原实现依赖 `@deepseek-ai/dsh-client-store` 的 `createSnapshotStore`；自带版改为等价的极小实现（`subscribe` / `getSnapshot` / `set`），以彻底断开该依赖。语义（暂存编辑、保存、修订栅栏、`base`/`user` 分层、overridden 判定）完全保留。
 
-## 0.2.1 适配说明（2026-10-21 核对）
+## 0.2.1 适配说明（2026-10-21 核对，2026-10-26 修复守卫）
 
-已对照 dsh 源码 `0.2.1-rc.2`（`D:\AI_ls\deepseekHarness`）核对。宿主契约未变，本插件不需要为 0.2.1 重写：
+已对照 dsh 源码 `0.2.1-rc.2` 与桌面版 `0.2.1-rc.3` 核对。本轮修改涉及的宿主包（`dsh-web`、`dsh-settings`、`dsh-config-editor`、`dsh-client-ui-settings-web-search`）在 rc.2 → rc.3 之间只有版本号变化，契约未变：
 
 - `ctx.web` 的 provider 接口、`registerSearchProvider` / `registerFetchProvider`、`WebError` 与错误码、`WebSearchResult` / `WebFetchResult` 形状均未变。
 - `@deepseek-ai/dsh-credentials` 的 `credentialRef` / `isCredentialRefName` / `resolve()`、`@deepseek-ai/dsh-launch-environment` 的 `launchEnvironmentOf()` 均未变；0.2.1 把凭据优先级改为「存储优先于环境」，与本插件「字面量 → credentials → 启动环境」的解析顺序一致。
@@ -157,7 +157,11 @@ searchType: c.search_type || provider.searchTypes?.[0] || "web"
    | 本插件开 | 强制 9router；守卫发现 `web` 选择被改走时写回 `9router` / `9router-fetch` |
    | 本插件关 | seam 保持当前选择；若仍是 9router，则走插件内部的内置等价实现；内置开关可正常切换 |
 
-   `enabled` 为 `true` 时，`installWebSelectionGuard` 订阅 `settings/document-updated`，用 `settings.describe()` 读取 `web` 的生效值，发现不是 9router 就用 `settings.update('web', …)` 写回。写入放在微任务里避免重入；写回值与 bundle 层一致时，settings 会直接删除用户层覆盖，所以内置开关保存后会在下一次刷新被改回 OFF，日志会记录一条 `restoring web.searchProvider/fetchProvider to 9router`。`enabled` 为 `false` 时守卫不写入，把选择权交还内置页面。
+   `enabled` 为 `true` 时，`installWebSelectionGuard` 订阅 `settings/document-updated`，用 `settings.describe()` 读取 `web` 的生效值，发现不是 9router 就用 `settings.update('web', …)` 写回。写回值与 bundle 层一致时，settings 会直接删除用户层覆盖，所以内置开关保存后会自己弹回 OFF，日志会记录一条 `restoring web.searchProvider/fetchProvider to 9router`。`enabled` 为 `false` 时守卫不写入，把选择权交还内置页面。
+
+   **写回为什么要绕到事务外**（2026-10-26 修复）：`settings/document-updated` 是在宿主配置重载的 HMR 事务内派发的（`SettingsForms.describe()` 在 `configEditor.edit()` 的 `runExclusive` 里被调用），而 `runExclusive` 用 `AsyncLocalStorage` 标记事务，该标记会沿 `queueMicrotask` / `setTimeout` / `await` 传播。直接在事件回调或“微任务 + 延时重试”里调 `settings.update()`，只会得到 `HMR transactions cannot be nested`，写回被静默拒绝；表现就是内置开关保存后一直停在新选择上，看起来像开关坏了。现在守卫在模块首次加载时（宿主启动阶段，事务之外）创建一个常驻 `MessagePort`，把写回任务 post 过去，端口回调在创建时的空上下文里运行，`settings.update()` 于是重新进入 `hmr.runExclusive()` 的排队逻辑而不是被判为嵌套；写入按 `writing` 串行化，重载/写锁的瞬时失败按 50ms 起指数退避重试，最多 8 次。若插件代码经 HMR 在事务内重新导入，新端口会继承事务标记，日志会记录无法写回，重启 dsh 即可恢复。
+
+   这不是 rc.3 才引入的问题：rc.2 的 `configEditor.edit()` 同样包在 `hmr.runExclusive()` 里，之前的守卫只在 stub 和裸 Cordis 上下文里验证过，没有在真实 GUI 的保存事务里跑过。验证方式：插件开启时把内置开关拨到开并保存，`web` 用户层覆盖应被删除（`cordis.patch.yml` 里不再有 `web` 的 `searchProvider: deepseek-search-api`），页面上的开关会回到 OFF，日志出现 `restoring web.searchProvider/fetchProvider to 9router`。桌面版是 git 安装的实体副本，改完 `lib/index.js` 后需同步到 `profiles/desktop/node_modules/9router-web-search` 并重启 dsh。
 
    因此，开启插件时不会出现“拨一下内置开关就绕过插件、没 DeepSeek 凭据导致搜索全挂”的情况。例外是 `web` 行被 home patch 或命令行 overlay 覆盖：`configEditor.edit` 会拒绝写入，守卫只能记录警告，无法强制——这是宿主规定的覆盖优先级。
 
@@ -178,4 +182,4 @@ searchType: c.search_type || provider.searchTypes?.[0] || "web"
   - **升级 dsh 后**若出现模块缺失或 API 不存在，核对两个不变量：① `package.json` 里 peer 声明的每个包名，都仍出现在 dsh 安装闭包中（`app.asar` 内 `dsh/node_modules/@deepseek-ai/*`，本次核对时共 289 个）；② 插件直接 import 的每个包名都已声明 peer。历史上 `profiles/node_modules` 曾是指向 **npm 版 dsh** `0.1.0-rc.7` 的 junction 农场，那套缺 `schemastery.volatile()` 与 `dsh-credentials.isCredentialRefName`，加载会崩；该农场已于 2026-10-13 清理。
 - **分发方式**：本地开发用 profile 的 `link:` 依赖（见上）。要装到别的机器，走 git 源（`dsh plugin add github:<用户>/dsh-9router-web-search`），由插件管理器在 profile 内跑 pnpm 安装依赖。**`lib/` 必须提交**：安装前会预检 `exports` 指向的文件真实存在，缺构建产物会直接判为失败。
 - **命名空间即 entry id**：settings 命名空间等于 profile 里的 entry id。若要改名，`cordis.patch.yml` 的 `id`、`lib/index.js` 的 `name`、`lib/client.js` 的 bundle `id` 与 `ROUTER_NS` 必须一起改；旧命名空间下面板写入的用户层配置会变成孤儿。
-- **桌面版契约**：本插件按 dsh **0.2.0-rc.2** 的接口编写，并已核对 **0.2.1-rc.2** 仍然兼容（见上节「0.2.1 适配说明」）。用于更早的 npm 版 dsh 需要按旧 API 改写。
+- **桌面版契约**：本插件按 dsh **0.2.0-rc.2** 的接口编写，并已核对 **0.2.1-rc.2 / 0.2.1-rc.3** 仍然兼容（见上节「0.2.1 适配说明」）。用于更早的 npm 版 dsh 需要按旧 API 改写。
